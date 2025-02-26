@@ -1,0 +1,11 @@
+streamlit
+pymupdf
+pytesseract
+Pillow
+python-dotenv
+numpy
+gensim
+nltk
+faiss-cpu
+langchain
+langchain_groq
