@@ -19,10 +19,7 @@ try:
     from langchain.chains.summarize import load_summarize_chain
     from langchain.vectorstores.faiss import FAISS
     from langchain_groq import ChatGroq
-    # Replace HuggingFaceEmbeddings with Gensim Word2Vec
-    from gensim.models import Word2Vec
-    from gensim.utils import simple_preprocess
-    from nltk.tokenize import word_tokenize
+    # Import langchain embeddings for sentence transformers
     from langchain.embeddings import HuggingFaceEmbeddings
     # Import NLTK for preprocessing
     import nltk
@@ -46,8 +43,12 @@ if 'vector_store_initialized' not in st.session_state:
     st.session_state.vector_store_initialized = False
 if 'document_summary' not in st.session_state:
     st.session_state.document_summary = None
-if 'word2vec_model' not in st.session_state:
-    st.session_state.word2vec_model = None
+if 'chat_history' not in st.session_state:
+    st.session_state.chat_history = []
+if 'document_uploaded' not in st.session_state:
+    st.session_state.document_uploaded = False
+if 'document_processed' not in st.session_state:
+    st.session_state.document_processed = False
 
 # Load API Key
 load_dotenv()
@@ -78,52 +79,6 @@ memory = ConversationBufferMemory(memory_key="chat_history", return_messages=Tru
 # Define vector_store as a global variable
 vector_store = None
 
-# Custom Word2Vec embeddings for LangChain
-class Word2VecEmbeddings:
-    def __init__(self, model=None):
-        self.model = model
-        self.vector_size = model.vector_size if model else 100
-        
-    def embed_documents(self, texts):
-        """Embed a list of texts as a list of embeddings."""
-        embeddings = []
-        for text in texts:
-            embeddings.append(self.embed_query(text))
-        return embeddings
-
-    def embed_query(self, text):
-        """Embed a query text."""
-        # Preprocess and tokenize
-        tokens = simple_preprocess(text)
-        
-        # Get vectors for each token and compute average
-        vec = np.zeros(self.vector_size)
-        count = 0
-        for token in tokens:
-            if token in self.model.wv:
-                vec += self.model.wv[token]
-                count += 1
-        
-        # Normalize if there are any tokens in the vocabulary
-        if count > 0:
-            vec /= count
-        return vec.tolist()
-
-# Function to train Word2Vec model on document text
-def train_word2vec(texts, vector_size=100, window=5, min_count=1):
-    # Preprocess and tokenize all texts
-    tokenized_texts = [simple_preprocess(text) for text in texts]
-    
-    # Train the model
-    model = Word2Vec(sentences=tokenized_texts, 
-                     vector_size=vector_size, 
-                     window=window, 
-                     min_count=min_count,
-                     workers=4)
-    
-    # Return the trained model
-    return model
-
 # Function to extract text from PDF using PyMuPDF and pytesseract
 def extract_text_from_pdf(pdf_file):
     try:
@@ -150,7 +105,6 @@ def extract_text_from_pdf(pdf_file):
                     if img_text.strip():
                         full_text.append(img_text)
             except Exception as img_error:
-                st.warning(f"Error extracting images from page {page_num+1}: {str(img_error)}")
                 continue
                 
         return "\n".join(full_text)
@@ -158,7 +112,6 @@ def extract_text_from_pdf(pdf_file):
         st.error(f"Error processing PDF: {str(e)}")
         return ""
 
-# Function for document summarization
 # Function for document summarization
 def summarization(extracted_text):
     if not extracted_text or extracted_text.strip() == "":
@@ -212,7 +165,7 @@ def summarization(extracted_text):
                 if i + batch_size < len(documents):
                     time.sleep(2)
         except Exception as progress_error:
-            st.warning(f"Progress tracking error (non-critical): {str(progress_error)}")
+            pass
         finally:
             # Ensure progress bar shows completion
             progress_bar.progress(1.0)
@@ -223,44 +176,8 @@ def summarization(extracted_text):
         return documents, final_summary
     except Exception as e:
         st.error(f"Error during summarization: {str(e)}")
-        st.error(traceback.format_exc())
         return [], "Summarization failed due to an error."
-    
-# Custom Word2Vec embeddings for LangChain
-class Word2VecEmbeddings:
-    def __init__(self, model=None):
-        self.model = model
-        self.vector_size = model.vector_size if model else 100
-    
-    def __call__(self, text):
-        """Make the class callable to match LangChain's expectations"""
-        return self.embed_query(text)
-        
-    def embed_documents(self, texts):
-        """Embed a list of texts as a list of embeddings."""
-        embeddings = []
-        for text in texts:
-            embeddings.append(self.embed_query(text))
-        return embeddings
 
-    def embed_query(self, text):
-        """Embed a query text."""
-        # Preprocess and tokenize
-        tokens = simple_preprocess(text)
-        
-        # Get vectors for each token and compute average
-        vec = np.zeros(self.vector_size)
-        count = 0
-        for token in tokens:
-            if token in self.model.wv:
-                vec += self.model.wv[token]
-                count += 1
-        
-        # Normalize if there are any tokens in the vocabulary
-        if count > 0:
-            vec /= count
-        return vec.tolist()
-    
 def create_vector_store(documents):
     global vector_store
     
@@ -269,76 +186,20 @@ def create_vector_store(documents):
         return None
         
     try:
-        st.info("Training Word2Vec model on document content...")
+        # Use HuggingFaceEmbeddings with sentence-transformers model directly
+        embedding_model = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2",
+            model_kwargs={"device": "cpu"}
+        )
         
-        # Extract text from documents
-        texts = [doc.page_content for doc in documents]
-        
-        # Train Word2Vec model if not already trained
-        if not st.session_state.word2vec_model:
-            st.session_state.word2vec_model = train_word2vec(texts)
-            st.success("Word2Vec model trained successfully!")
-            
-        # Create embedding wrapper for the Word2Vec model
-        embedding_model = Word2VecEmbeddings(model=st.session_state.word2vec_model)
-        
-        # Create FAISS vector store with debug info
-        st.info(f"Creating vector store with {len(documents)} documents...")
+        # Create FAISS vector store
         vector_store = FAISS.from_documents(documents, embedding_model)
         st.session_state.vector_store = vector_store  # Store in session state
-        st.success("Vector store created successfully!")
         return vector_store
     except Exception as e:
         st.error(f"Error creating vector store: {str(e)}")
-        st.error(traceback.format_exc())
-        
-        # Fallback to using a simpler, more compatible approach
-        try:
-            st.warning("Custom embedding failed. Trying a simpler Word2Vec approach...")
-            
-            # Create embeddings manually
-            document_embeddings = []
-            for doc in documents:
-                tokens = simple_preprocess(doc.page_content)
-                vec = np.zeros(st.session_state.word2vec_model.vector_size)
-                count = 0
-                for token in tokens:
-                    if token in st.session_state.word2vec_model.wv:
-                        vec += st.session_state.word2vec_model.wv[token]
-                        count += 1
-                if count > 0:
-                    vec /= count
-                document_embeddings.append(vec)
-            
-            # Create FAISS index manually
-            import faiss
-            dimension = st.session_state.word2vec_model.vector_size
-            index = faiss.IndexFlatL2(dimension)
-            document_embeddings = np.array(document_embeddings).astype('float32')
-            index.add(document_embeddings)
-            
-            # Create a custom retrieval function
-            def custom_retrieval(query_text, k=3):
-                tokens = simple_preprocess(query_text)
-                query_vec = np.zeros(dimension)
-                count = 0
-                for token in tokens:
-                    if token in st.session_state.word2vec_model.wv:
-                        query_vec += st.session_state.word2vec_model.wv[token]
-                        count += 1
-                if count > 0:
-                    query_vec /= count
-                query_vec = np.array([query_vec]).astype('float32')
-                D, I = index.search(query_vec, k)
-                results = [documents[i] for i in I[0] if i < len(documents)]
-                return results
-            
-            st.session_state.custom_retriever = custom_retrieval
-            st.success("Created custom retrieval function!")
-            return True  # Return True to indicate success
-        except Exception as fallback_error:
-            st.error(f"All embedding approaches failed: {str(fallback_error)}")
-            return None
+        return None
+    
         
 def RAG(query):
     if not query or query.strip() == "":
@@ -379,9 +240,7 @@ def RAG(query):
         
         return response
     except Exception as e:
-        st.error(f"Error during RAG processing: {str(e)}")
-        st.error(traceback.format_exc())
-        return f"An error occurred while processing your query. Please try again."
+        return f"An error occurred while processing your query: {str(e)}. Please try again."
     
 # Function for risk analysis
 def risk_analysis(final_summary):
@@ -405,119 +264,129 @@ def risk_analysis(final_summary):
         
         return response
     except Exception as e:
-        st.error(f"Error during risk analysis: {str(e)}")
         return "Risk analysis failed due to an error."
+
+# Regular chat function
+def regular_chat(query):
+    if not query or query.strip() == "":
+        return "Please enter a message."
+    
+    try:
+        prompt = PromptTemplate(
+            input_variables=["query"],
+            template="""You are a helpful legal assistant. Answer the following query:
+            
+            Query: {query}
+            
+            Answer:"""
+        )
+        
+        chain = LLMChain(llm=llm, prompt=prompt)
+        response = chain.run(query=query)
+        
+        return response
+    except Exception as e:
+        return f"An error occurred. Please try again."
+
+# Process document function
+def process_document(uploaded_file):
+    with st.spinner("Processing document..."):
+        # Extract text
+        extracted_text = extract_text_from_pdf(uploaded_file)
+        if not extracted_text:
+            st.error("Failed to extract text from the document.")
+            return False
+        
+        st.session_state.extracted_text = extracted_text
+        
+        # Summarize and prepare for chat
+        documents, summary = summarization(extracted_text)
+        if not documents or not summary:
+            st.error("Failed to process document.")
+            return False
+        
+        st.session_state.document_summary = summary
+        
+        # Create vector store
+        if create_vector_store(documents):
+            st.session_state.vector_store_initialized = True
+            return True
+        else:
+            st.error("Failed to create vector store.")
+            return False
 
 # === Streamlit UI ===
 st.title("📜 Legal Document Assistant")
-st.markdown("Upload a legal document and choose an action!")
 
-# Create sidebar for instructions and details
-with st.sidebar:
-    st.header("About this App")
-    st.markdown("""
-    This application helps analyze legal documents by:
-    - Extracting text from PDFs (including text in images)
-    - Providing a chat interface to ask questions about the document
-    - Generating document summaries
-    - Analyzing potential legal risks
-    """)
-    
-    st.header("Instructions")
-    st.markdown("""
-    1. Upload a PDF document
-    2. Extract text from the document
-    3. Choose an action: Chat, Summarize, or Analyze Risks
-    """)
-    
-    # Add embedding model info
-    st.header("Technical Notes")
-    st.markdown("""
-    - This app uses Word2Vec for document embeddings
-    - Word2Vec is trained on your document's content
-    - This approach provides faster processing and better semantic understanding
-    """)
+# Main chat interface with centered upload section
+col1, col2, col3 = st.columns([1, 2, 1])
 
-# Main app area
-uploaded_file = st.file_uploader("Upload your PDF", type="pdf")
-
-if uploaded_file is not None:
-    st.success("File uploaded successfully!")
+with col2:
+    uploaded_file = st.file_uploader("Upload your PDF", type="pdf")
     
-    # Extract text button
-    if st.button("Extract Text"):
-        with st.spinner("Extracting text from document..."):
-            extracted_text = extract_text_from_pdf(uploaded_file)
-            if extracted_text:
-                st.session_state.extracted_text = extracted_text
-                st.success("Text extracted successfully!")
-                # Show a small preview of the extracted text
-                st.markdown("### Text Preview")
-                st.markdown(extracted_text[:500] + "..." if len(extracted_text) > 500 else extracted_text)
+    if uploaded_file is not None and not st.session_state.document_uploaded:
+        st.session_state.document_uploaded = True
+        
+    if st.session_state.document_uploaded and not st.session_state.document_processed:
+        if st.button("Process Document"):
+            success = process_document(uploaded_file)
+            if success:
+                st.session_state.document_processed = True
+                st.success("Document processed successfully!")
             else:
-                st.error("Failed to extract text from the document.")
-    
-    # Check if text has been extracted
-    if st.session_state.extracted_text:
-        extracted_text = st.session_state.extracted_text
+                st.session_state.document_uploaded = False
+
+    # Document specific options after uploading
+    if st.session_state.document_processed:
+        st.markdown("### Document Options")
         
-        # Select task
-        task = st.selectbox("Choose an option:", ["Chat with Document (RAG)", "Summarization", "Risk Analysis"])
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("Summarize Document"):
+                st.session_state.chat_history.append({"role": "user", "content": "Please summarize the document."})
+                with st.spinner("Generating summary..."):
+                    response = st.session_state.document_summary
+                st.session_state.chat_history.append({"role": "assistant", "content": response})
         
-        if task == "Chat with Document (RAG)":
-            # Initialize vector store if not already done
-            if not st.session_state.vector_store_initialized:
-                with st.spinner("Preparing document for chat... This may take a few minutes for large documents."):
-                    documents, summary = summarization(extracted_text)
-                    if documents and create_vector_store(documents):
-                        st.session_state.vector_store_initialized = True
-                        st.session_state.document_summary = summary
-                        st.success("Document prepared for chat!")
-                    else:
-                        st.error("Failed to prepare document for chat.")
-            
-            if st.session_state.vector_store_initialized:
-                query = st.text_input("Enter your query about the document:")
-                if st.button("Ask Document"):
-                    if query:
-                        with st.spinner("Generating response..."):
-                            response = RAG(query)
-                        st.subheader("📌 Response:")
-                        st.write(response)
-                    else:
-                        st.warning("Please enter a query.")
-        
-        elif task == "Summarization":
-            if st.button("Generate Summary"):
-                with st.spinner("Summarizing... This may take a few minutes for large documents."):
-                    documents, final_summary = summarization(extracted_text)
-                    if documents and final_summary:
-                        # Store for later use
-                        st.session_state.document_summary = final_summary
-                        if not st.session_state.vector_store_initialized and create_vector_store(documents):
-                            st.session_state.vector_store_initialized = True
-                
-                if st.session_state.document_summary:
-                    st.subheader("📌 Document Summary:")
-                    st.write(st.session_state.document_summary)
-        
-        elif task == "Risk Analysis":
+        with col_b:
             if st.button("Analyze Risks"):
-                # Check if we already have a summary
-                if st.session_state.document_summary:
-                    final_summary = st.session_state.document_summary
-                else:
-                    with st.spinner("Summarizing document first... This may take a few minutes."):
-                        documents, final_summary = summarization(extracted_text)
-                        if documents and final_summary:
-                            st.session_state.document_summary = final_summary
-                            if not st.session_state.vector_store_initialized and create_vector_store(documents):
-                                st.session_state.vector_store_initialized = True
-                
-                if st.session_state.document_summary:
-                    with st.spinner("Analyzing risks..."):
-                        risk_output = risk_analysis(final_summary)
-                    st.subheader("⚠️ Risk Analysis Report:")
-                    st.write(risk_output)
+                st.session_state.chat_history.append({"role": "user", "content": "Please analyze the risks in this document."})
+                with st.spinner("Analyzing risks..."):
+                    response = risk_analysis(st.session_state.document_summary)
+                st.session_state.chat_history.append({"role": "assistant", "content": response})
+
+# Chat message container with scrolling
+chat_container = st.container()
+
+# Display chat history
+with chat_container:
+    for message in st.session_state.chat_history:
+        if message["role"] == "user":
+            st.markdown(f"**You:** {message['content']}")
+        else:
+            st.markdown(f"**Assistant:** {message['content']}")
+
+# User input text box (available after document processing)
+if st.session_state.document_processed:
+    user_input = st.text_input("Type your message here...", key="user_input")
+
+    if st.button("Send"):
+        if user_input:
+            # Store user input in chat history
+            st.session_state.chat_history.append({"role": "user", "content": user_input})
+
+            # Generate response using RAG
+            with st.spinner("Thinking..."):
+                response = RAG(user_input)
+            
+            # Store assistant response
+            st.session_state.chat_history.append({"role": "assistant", "content": response})
+
+            # FIX: Safely clear user input
+            del st.session_state["user_input"]
+
+            # Rerun Streamlit to refresh chat
+            st.experimental_rerun()
 else:
-    st.info("Please upload a PDF document to get started.")
+    if st.session_state.document_uploaded:
+        st.info("📄 Please process the document first.")
