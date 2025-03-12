@@ -6,13 +6,11 @@ python-dotenv
 yagmail
 markdown
 reportlab
-re
 langchain
 faiss-cpu
 langchain-groq
 sentence-transformers
 matplotlib
 torch
-easyocr
 langchain-community
 tavily-search

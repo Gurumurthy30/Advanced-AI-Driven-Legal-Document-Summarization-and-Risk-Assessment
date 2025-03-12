@@ -17,10 +17,8 @@ import matplotlib.pyplot as plt
 import textwrap
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
-import torch
-from concurrent.futures import ThreadPoolExecutor  # ✅ Fix: Move this import to the top
+import pytesseract
 
-# Import langchain components with error handling
 try:
     from langchain.memory import ConversationBufferMemory
     from langchain.prompts import PromptTemplate
@@ -165,34 +163,30 @@ except Exception as e:
 # Initialize Memory
 memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
 
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
-# Check if GPU is available
-device = torch.cuda.is_available()
-
-# Initialize EasyOCR reader (English only, add other languages if needed)
-reader = easyocr.Reader(['en'], gpu=device)
-
-def extract_text_from_pdf(uploaded_file):
-    doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
+def Extract_text_from_pdf(uploaded_file):
+    doc = fitz.open(stream=uploaded_file.read(), filetype="pdf") 
     full_text = []
 
-    for page in doc:
-        text = page.get_text("text").strip()
+    for page_num in range(len(doc)):
+        page  = doc[page_num]
+        text = page.get_text("text")
 
-        # Extract text if available
-        if text:
+        if text.strip():
             full_text.append(text)
+        else:
+            image_list = page.get_images(page)
+            extracted_text=""
 
-        # Extract text from images if present
-        for img in page.get_images(full=True):
-            base_image = doc.extract_image(img[0])
-            image_bytes = base_image["image"]
-            img_text = "\n".join(reader.readtext(image_bytes, detail=0))
-
-            if img_text:
-                full_text.append(img_text)
-
-    return "\n".join(full_text)
+            for img_index,img in enumerate(image_list):
+                xref = img[0]
+                base_image = doc.extract_image(xref)
+                image_bytes = base_image["image"]
+                img_pil = Image.open(io.BytesIO(image_bytes))
+                extracted_text+=pytesseract.image_to_string(img_pil) + "/n"
+                full_text.append(extracted_text)
+    return("\n".join(full_text))
 
 # Function for document summarization
 def summarization(extracted_text):
@@ -201,7 +195,7 @@ def summarization(extracted_text):
         return [], ""
         
     try:
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=6000, chunk_overlap=600)
         chunks = text_splitter.split_text(extracted_text)
         
         if not chunks:
@@ -248,7 +242,7 @@ def summarization(extracted_text):
                 
                 # Avoid rate limiting
                 if i + batch_size < len(documents):
-                    time.sleep(3)
+                    time.sleep(1)
         except Exception as progress_error:
             st.error(f"Error processing document chunks: {str(progress_error)}")  # Handle errors properly
         intermediate_summary = "\n".join(all_chunk_summaries)  # This should be outside `finally`
@@ -282,7 +276,7 @@ def create_vector_store(documents):
         return None
 
 # Improved RAG function for document-specific queries
-def rag_query(query):
+def Chat_doc(query):
     """Search the uploaded document for information related to the query."""
     if not query or query.strip() == "":
         return "Please enter a valid query."
@@ -328,13 +322,39 @@ def simple_risk_analysis(document_text):
     
     # Define risk categories with keywords
     risk_categories = {
-        "Compliance Risks": ["compliance", "regulation", "legal", "law", "policy", "GDPR", "privacy"],
-        "Financial Risks": ["financial", "penalty", "liability", "fine", "payment", "cost", "tax"],
-        "Contractual Risks": ["contract", "agreement", "term", "clause", "warranty", "termination"],
-        "IP Risks": ["intellectual property", "patent", "copyright", "trademark", "confidential"],
-        "Operational Risks": ["operational", "breach", "disruption", "delay", "performance", "deadline"]
-    }
-    
+    "Regulatory Risks": [
+        "compliance", "regulation", "violation", "legal obligation", "policy breach", 
+        "statutory requirement", "government approval", "licensing", "audit", "penalty", 
+        "reporting failure", "non-compliance", "due diligence", "risk assessment", 
+        "legal proceedings"
+    ],
+    "Criminal Risks": [
+        "crime", "offense", "penalty", "prosecution", "conviction", "imprisonment", 
+        "fraud", "forgery", "embezzlement", "bribery", "money laundering", "extortion", 
+        "smuggling", "harassment", "cybercrime", "homicide", "theft", "assault", 
+        "domestic violence", "illegal possession"
+    ],
+    "Contractual Risks": [
+        "contract breach", "liability", "damages", "negligence", "compensation", 
+        "settlement", "plaintiff", "defendant", "arbitration", "mediation", "remedy", 
+        "indemnity", "lawsuit", "decree", "jurisdiction", "litigation", "injunction", 
+        "fiduciary duty", "legal notice"
+    ],
+    "Property Risks": [
+        "ownership", "possession", "lease", "title dispute", "eviction", "trespassing", 
+        "mortgage", "foreclosure", "inheritance", "zoning laws", "land acquisition", 
+        "boundary dispute", "property rights", "transfer of property", "real estate fraud", 
+        "encumbrance", "adverse possession", "land survey", "occupancy"
+    ],
+    "Financial Risks": [
+        "tax evasion", "tax fraud", "financial misreporting", "audit", "revenue loss", 
+        "bankruptcy", "debt recovery", "loan default", "insolvency", "foreclosure", 
+        "credit risk", "monetary penalty", "securities fraud", "insider trading", 
+        "banking regulations", "investment fraud", "fiscal policy violation", 
+        "money laundering", "interest liability"
+    ]
+}
+
     # Normalize text for analysis
     text = document_text.lower()
     
@@ -477,7 +497,7 @@ def initialize_agent_with_tools():
             tools.append(
                 Tool(
                     name="Document Search",
-                    func=rag_query,
+                    func=Chat_doc,
                     description="Use this tool when you need to search within the uploaded legal document for specific information, clauses, or details mentioned in the document."
                 )
             )
@@ -488,7 +508,7 @@ def initialize_agent_with_tools():
             llm=llm,
             agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
             handle_parsing_errors=True,
-            verbose=True,
+            #verbose=True,
             max_iterations=3,
             early_stopping_method="generate"
         )
@@ -505,7 +525,7 @@ def process_document(file1, file2=None):
         
         try:
             # Extract text from first document
-            text1 = extract_text_from_pdf(file1)
+            text1 = Extract_text_from_pdf(file1)
             if not text1:
                 st.error("Failed to extract text from the first document.")
                 return "Error: First document could not be processed."
@@ -514,7 +534,7 @@ def process_document(file1, file2=None):
             
             if file2:
                 # Extract text from second document
-                text2 = extract_text_from_pdf(file2)
+                text2 = Extract_text_from_pdf(file2)
                 if not text2:
                     st.error("Failed to extract text from the second document.")
                     return "Error: Second document could not be processed."
@@ -529,7 +549,7 @@ def process_document(file1, file2=None):
             # Run summarization
             documents, summary = summarization(combined_text)
             if not documents or not summary:
-                st.error("Failed to process document(s).")
+                st.error("Failed to process document.")
                 return "Error: Document processing failed."
             
             # Store the summary in session state
@@ -583,7 +603,7 @@ def process_document(file1, file2=None):
 
 def send_email(sender_email, sender_password, recipient_email, subject, body, attachment_path):
     if not os.path.exists(attachment_path):
-        return "❌ Failed to send email: PDF file is missing."
+        return "Failed to send email: PDF file is missing."
 
     try:
         msg = MIMEMultipart()
@@ -603,9 +623,9 @@ def send_email(sender_email, sender_password, recipient_email, subject, body, at
         server.sendmail(sender_email, recipient_email, msg.as_string())
         server.quit()
 
-        return "✅ Email sent successfully!"
+        return "Email sent successfully!"
     except Exception as e:
-        return f"❌ Failed to send email: {str(e)}"
+        return f"Failed to send email: {str(e)}"
 
 def convert_summary_and_risk_to_pdf(summary, risk_analysis):
     """Convert summary and risk analysis to PDF and save it for email attachment."""
@@ -728,44 +748,31 @@ def convert_summary_and_risk_to_pdf(summary, risk_analysis):
 # Main UI with sidebar for document upload and main area for chat
 
 # File uploader in sidebar
-uploaded_files = st.sidebar.file_uploader("Upload PDF Document(s)", type="pdf", accept_multiple_files=True, key="pdf_uploader")
+uploaded_files = st.sidebar.file_uploader("Upload PDF Document", type="pdf", accept_multiple_files=True, key="pdf_uploader")
 
 # Document processing section
+# Document processing section
 if uploaded_files:
-    # Process button in sidebar
-    if st.sidebar.button("Process Document(s)"):
+    if st.sidebar.button("Process Document..."):
         st.session_state.document_uploaded = True
         st.session_state.document_processed = False
-        
+
         if len(uploaded_files) == 1:
             # Single document processing
             summary = process_document(uploaded_files[0])
             if summary and not summary.startswith("Error"):
                 st.session_state.document_processed = True
-                # Add a system message to the chat history
-                #st.session_state.chat_history.append({
-                #    "role": "system", 
-                #    "content": f"Document '{uploaded_files[0].name}' has been processed successfully."
-                #})
-                #st.session_state.chat_history.append({
-                #    "role": "assistant", 
-                #    "content": f"I've processed your document. You can now ask questions about it or use the sidebar options to view the summary and risk analysis."
-                #})
+
         elif len(uploaded_files) == 2:
             # Document comparison processing
-            with st.spinner("Comparing documents..."):
+            #with st.spinner("Comparing documents..."):
                 comparison_result = process_document(uploaded_files[0], uploaded_files[1])
-                
+
                 if comparison_result and not comparison_result.startswith("Error"):
-                    # Store the comparison result
                     st.session_state.document_comparison = comparison_result
                     st.session_state.document_processed = True
                     
                     # Add comparison result to chat history
-                    st.session_state.chat_history.append({
-                        "role": "system", 
-                        "content": f"Documents '{uploaded_files[0].name}' and '{uploaded_files[1].name}' have been compared."
-                    })
                     st.session_state.chat_history.append({
                         "role": "assistant", 
                         "content": f"**Document Comparison:**\n\n{comparison_result}"
@@ -886,8 +893,6 @@ if st.session_state.document_processed:
 # Main chat interface area
 st.title("Legal Document Assistant")
 
-# Chat history display
-#st.markdown("### Chat History")
 chat_container = st.container()
 # Chat history display (around line 830)
 with chat_container:

@@ -31,8 +31,5 @@ def Extract_text_from_pdf(pdf_path):
                 full_text.append(extracted_text)
     return("\n".join(full_text))
 
-
-#doc = r"C:\Users\gurum\Documents\2025021580.pdf"
-#extract_text = Extract_text_from_pdf(doc)
-#lines = extract_text.split("\n")
-#print(extract_text)
+pdf_file_path = r"C:\Users\gurum\Documents\Judgement 010.pdf"
+print(Extract_text_from_pdf(pdf_file_path))
