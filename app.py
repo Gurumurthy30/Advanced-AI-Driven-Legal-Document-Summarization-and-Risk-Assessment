@@ -133,25 +133,14 @@ if 'risk_pie_data' not in st.session_state:
 load_dotenv()
 
 # Check for API keys
-GROQ_API_KEY = os.getenv('GROQ_API_KEY')
-TAVILY_API_KEY = os.getenv('TAVILY_API_KEY')
-EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
-EMAIL_SENDER = os.getenv('EMAIL_SENDER')
-
-if not GROQ_API_KEY:
-    st.error("GROQ_API_KEY is missing! Please set it in your .env file.")
-    st.info("Create a .env file with: GROQ_API_KEY=your_groq_api_key_here")
-    st.stop()
-
-if not TAVILY_API_KEY:
-    st.error("TAVILY_API_KEY is missing! Please set it in your .env file.")
-    st.info("Update your .env file with: TAVILY_API_KEY=your_tavily_api_key_here")
-    st.stop()
+os.environ['GROQ_API_KEY'] = os.getenv('GROQ_API_KEY')
+os.environ['TAVILY_API_KEY'] = os.getenv('TAVILY_API_KEY')
+os.environ['EMAIL_PASSWORD'] = os.getenv('EMAIL_PASSWORD')
+os.environ['EMAIL_SENDER'] = os.getenv('EMAIL_SENDER')
 
 # Initialize LLM with error handling
 try:
     llm = ChatGroq(
-        groq_api_key=GROQ_API_KEY,
         model_name="llama3-70b-8192",
         temperature=0.3
     )
@@ -195,6 +184,7 @@ def summarization(extracted_text):
         return [], ""
         
     try:
+        # Split the text into chunks
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=6000, chunk_overlap=600)
         chunks = text_splitter.split_text(extracted_text)
         
@@ -202,56 +192,41 @@ def summarization(extracted_text):
             st.warning("No text chunks were created. The document might be empty or contain unsupported content.")
             return [], "No content to summarize."
             
+        # Convert chunks to Document objects
         documents = [Document(page_content=chunk) for chunk in chunks]
         
-        chunk_prompt = PromptTemplate(
-            template="Extract essential legal details: {text}",
-            input_variables=["text"]
-        )
-        final_prompt = PromptTemplate(
-            template="Summarize the extracted legal details: {text}",
-            input_variables=["text"]
-        )
-        chunk_prompt_template =  PromptTemplate(
+        # Define map prompt template
+        map_prompt_template = PromptTemplate(
             template="""**Role:** You are an AI assistant specialized in retrieving key information from legal documents.
-            **Task:** Identify and extract important essential details from the given text without summarizing, interpreting, or altering the information. Focus only on retrieving relevant important elements as they appear.levae the unnessary things and if aready a before chunk cover the information leave it.
-            **Text for Extraction:** {text}""",input_variables=["text"])
+            **Task:** Identify and extract important essential details from the given text without summarizing, interpreting, or altering the information. Focus only on retrieving relevant important elements as they appear. Leave the unnecessary things and if already covered in a previous chunk, ignore it.
+            **Text for Extraction:** {text}""",
+            input_variables=["text"]
+        )
         
-        final_prompt_template = PromptTemplate(
+        # Define combine prompt template
+        combine_prompt_template = PromptTemplate(
             template="""**Role:** You are an AI assistant specialized in summarizing and structuring the document based on extracted legal information.
             **Task:** Analyze all extracted details and generate a comprehensive summary, preserving key facts while omitting less important details. Ensure clarity, coherence, and logical structuring of the final output.
-            **Section Extracts:** {text}""",input_variables=["text"])
-
+            **Section Extracts:** {text}""",
+            input_variables=["text"]
+        )
         
-        map_chain = LLMChain(llm=llm, prompt=chunk_prompt,memory=memory)
-        combine_chain = LLMChain(llm=llm, prompt=final_prompt,memory=memory)
+        # Create map_reduce chain directly using LangChain's load_summarize_chain
+        chain = load_summarize_chain(
+            llm,
+            chain_type="map_reduce",
+            map_prompt=map_prompt_template,
+            combine_prompt=combine_prompt_template,
+            verbose=True
+        )
         
-        batch_size = 3
-        all_chunk_summaries = []
-        
-        try:
-            for i in range(0, len(documents), batch_size):
-                batch = documents[i:i+batch_size]
-                batch_summaries = []
-                
-                for doc in batch:
-                    summary = map_chain.run(text=doc.page_content)
-                    batch_summaries.append(summary)
-                    
-                all_chunk_summaries.extend(batch_summaries)
-                
-                # Avoid rate limiting
-                if i + batch_size < len(documents):
-                    time.sleep(1)
-        except Exception as progress_error:
-            st.error(f"Error processing document chunks: {str(progress_error)}")  # Handle errors properly
-        intermediate_summary = "\n".join(all_chunk_summaries)  # This should be outside `finally`
-        final_summary = combine_chain.run(text=intermediate_summary)
+        # Run the chain
+        final_summary = chain.run(documents)
         
         return documents, final_summary
     except Exception as e:
         st.error(f"Error during summarization: {str(e)}")
-        return [], "Summarization failed due to an error."
+        return [], f"Summarization failed due to an error: {str(e)}"
 
 # After summarization function - this is where you wanted me to start
 
@@ -477,7 +452,7 @@ def initialize_agent_with_tools():
     """Initialize the LangChain agent with web search and document chat tools."""
     try:
         # Initialize the Tavily Search tool
-        tavily_search = TavilySearchResults(max_results=3, tavily_api_key=TAVILY_API_KEY)
+        tavily_search = TavilySearchResults(max_results=3)
         
         # Create a list of tools
         tools = []
