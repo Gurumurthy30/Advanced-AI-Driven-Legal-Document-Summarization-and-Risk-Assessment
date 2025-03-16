@@ -12,7 +12,6 @@ from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
 from dotenv import load_dotenv
 from PIL import Image
-import easyocr
 import matplotlib.pyplot as plt
 import textwrap
 from reportlab.pdfgen import canvas
